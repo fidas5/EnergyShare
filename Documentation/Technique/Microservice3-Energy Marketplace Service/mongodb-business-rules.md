@@ -67,17 +67,16 @@ Les montants financiers seront manipulés en Java avec BigDecimal. Pour MongoDB,
 
 **R6 — Réservation :** la quantité demandée ne doit pas dépasser `remainingKwh`.
 
-**R7 — Concurrence :** les réservations simultanées doivent utiliser une mise à jour conditionnelle atomique.
 
-**R8 — Cohérence :** la création de la réservation et la diminution de la quantité doivent réussir ensemble, via une transaction MongoDB adaptée.
+**R7 — Cohérence :** la création de la réservation et la diminution de la quantité doivent réussir ensemble, via une transaction MongoDB adaptée.
 
-**R9 — Annulation :** une réservation annulée ou expirée libère sa quantité une seule fois.
+**R8 — Annulation :** une réservation annulée ou expirée libère sa quantité une seule fois.
 
-**R10 — Confirmation :** une transaction confirmée fait passer la réservation à `CONFIRMED`, sans restituer sa quantité.
+**R9 — Confirmation :** une transaction confirmée fait passer la réservation à `CONFIRMED`, sans restituer sa quantité.
 
-**R11 — Statuts :** une offre annulée ou expirée ne peut plus recevoir de réservation.
+**R10 — Statuts :** une offre annulée ou expirée ne peut plus recevoir de réservation.
 
-**R12 — Autorisation :** le vendeur ne peut pas réserver sa propre offre.
+**R11 — Autorisation :** le vendeur ne peut pas réserver sa propre offre.
 
 ## 4. Cas de panne
 
