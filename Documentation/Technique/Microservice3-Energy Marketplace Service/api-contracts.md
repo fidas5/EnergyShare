@@ -15,7 +15,7 @@ Le microservice Energy Marketplace permet aux foyers producteurs de publier des 
 | POST | `/offers` | Créer une offre d'énergie | 201 |
 | GET | `/offers` | Consulter et filtrer les offres | 200 |
 | GET | `/offers/{id}` | Consulter une offre | 200, 404 |
-| PATCH | `/offers/{id}` | Modifier une offre | 200, 400, 409 |
+| PUT | `/offers/{id}` | Modifier une offre | 200, 400, 409 |
 | DELETE | `/offers/{id}` | Annuler une offre | 204, 404, 409 |
 | POST | `/requests` | Créer une demande d'énergie | 201 |
 | GET | `/requests/{id}` | Consulter une demande | 200, 404 |
