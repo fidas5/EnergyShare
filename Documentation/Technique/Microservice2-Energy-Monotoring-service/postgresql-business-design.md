@@ -1,123 +1,262 @@
-# Energy Monitoring Service — RabbitMQ Events
+# Microservice 2 — Energy Monitoring Service
+## Conception métier et modèle PostgreSQL
 
-## Objectif
+**Projet :** EnergyShare  
+**Base de données :** PostgreSQL, dédiée au microservice 2 (nom proposé : `energy_monitoring_db`)  
+**Persistance :** Spring Data JPA / Hibernate  
+**Statut :** conception de la base et règles métier — non garantie d'implémentation
 
-RabbitMQ permet au microservice Energy Monitoring de communiquer de manière asynchrone avec les autres microservices d'EnergyShare.
+## 1. Contexte et limites fonctionnelles
 
-Après l'enregistrement des mesures et le calcul des bilans énergétiques, Monitoring publie des événements pour informer les services concernés sans les bloquer.
+Monitoring assure la **saisie manuelle** des relevés d'énergie par foyer, le calcul des bilans de production/consommation, l'historique et les alertes. Il ne gère ni les offres ni les réservations, ni les paiements, ni l'authentification. La propriété des foyers appartient à **User & Household Service**.
 
-**Technologie :** RabbitMQ, Spring AMQP  
-**Exchange :** `energyshare.events`  
-**Type d'exchange :** `topic`
+La donnée énergétique est **déclarative** : aucun équipement IoT, compteur intelligent ou transfert physique d'électricité n'est pris en charge dans le périmètre de ce prototype.
 
-## Événement 1 — EnergyReadingCreated
+## 2. Entités métier retenues
 
-**Producteur :** Energy Monitoring Service  
-**Consommateur :** AI Energy Optimization Service
+### 2.1 `EnergyReading`
 
-**Déclenchement :** après l'enregistrement réussi d'une mesure de production ou de consommation.
+| Champ Java | Type Java | Colonne PostgreSQL | Contraintes |
+|---|---|---|---|
+| `id` | `Long` | `id` | PK, identity |
+| `householdId` | `String` | `household_id` | `NOT NULL` |
+| `readingDate` | `LocalDate` | `reading_date` | `NOT NULL` |
+| `productionKwh` | `Double` | `production_kwh` | `NOT NULL`, `>= 0` |
+| `consumptionKwh` | `Double` | `consumption_kwh` | `NOT NULL`, `>= 0` |
+| `createdAt` | `LocalDateTime` | `created_at` | `NOT NULL` |
 
-**Routing key :** `monitoring.reading.created`
+**Règle proposée :** un relevé par foyer et par jour ; contrainte unique `(household_id, reading_date)` pour éviter les doublons.
 
-Exemple JSON :
+### 2.2 `EnergyBalance`
 
-```json
-{
-  "eventId": "evt_001",
-  "eventType": "EnergyReadingCreated",
-  "readingId": 1,
-  "householdId": "house_101",
-  "installationId": "installation_001",
-  "type": "PRODUCTION",
-  "valueKwh": 12.5,
-  "measuredAt": "2026-11-10T09:00:00Z",
-  "source": "SENSOR",
-  "occurredAt": "2026-11-10T09:01:00Z"
+| Champ Java | Type Java | Colonne PostgreSQL | Contraintes |
+|---|---|---|---|
+| `id` | `Long` | `id` | PK, identity |
+| `householdId` | `String` | `household_id` | `NOT NULL` |
+| `periodStart` | `LocalDate` | `period_start` | `NOT NULL` |
+| `periodEnd` | `LocalDate` | `period_end` | `NOT NULL`, `>= period_start` |
+| `totalProductionKwh` | `Double` | `total_production_kwh` | `NOT NULL`, `>= 0` |
+| `totalConsumptionKwh` | `Double` | `total_consumption_kwh` | `NOT NULL`, `>= 0` |
+| `surplusKwh` | `Double` | `surplus_kwh` | `NOT NULL`, `>= 0` |
+
+Les bilans peuvent être **matérialisés** dans cette table, ou calculés à la demande. Le SQL ci-dessous suit l'option **matérialisée** ; l'équipe doit définir comment les rafraîchir lors d'un changement de relevé.
+
+### 2.3 `EnergyAlert`
+
+| Champ Java | Type Java | Colonne PostgreSQL | Contraintes |
+|---|---|---|---|
+| `id` | `Long` | `id` | PK, identity |
+| `householdId` | `String` | `household_id` | `NOT NULL` |
+| `alertType` | `String` | `alert_type` | `NOT NULL` |
+| `message` | `String` | `message` | `NOT NULL` |
+| `severity` | `String` | `severity` | `NOT NULL` |
+| `createdAt` | `LocalDateTime` | `created_at` | `NOT NULL` |
+| `status` | `String` | `status` | `NOT NULL` |
+
+**Types d'alertes proposés :** `HIGH_CONSUMPTION`, `SURPLUS_AVAILABLE`, `MISSING_READING`. **Niveaux :** `INFO`, `WARNING`, `CRITICAL`. **États :** `UNREAD`, `READ`, `ARCHIVED`. Leur génération doit reposer sur des seuils et critères documentés, et ne pas se déclencher sans données suffisantes.
+
+## 3. Diagramme conceptuel simplifié
+
+Les trois entités sont liées au **même identifiant externe de foyer**, sans clé étrangère locale vers Household :
+
+```mermaid
+classDiagram
+    class EnergyReading {
+        +Long id
+        +String householdId
+        +LocalDate readingDate
+        +Double productionKwh
+        +Double consumptionKwh
+        +LocalDateTime createdAt
+    }
+    class EnergyBalance {
+        +Long id
+        +String householdId
+        +LocalDate periodStart
+        +LocalDate periodEnd
+        +Double totalProductionKwh
+        +Double totalConsumptionKwh
+        +Double surplusKwh
+    }
+    class EnergyAlert {
+        +Long id
+        +String householdId
+        +String alertType
+        +String message
+        +String severity
+        +LocalDateTime createdAt
+        +String status
+    }
+    note for EnergyReading "Saisie manuelle"
+    note for EnergyBalance "Agrégation par foyer et période"
+    note for EnergyAlert "Notification métier par foyer"
+```
+
+**Remarque :** ce diagramme exprime un lien **logique**, pas des clés étrangères JPA entre les tables : la cohérence des références au foyer et la relation avec Household sont gérées via API et règles applicatives.
+
+## 4. Schéma PostgreSQL proposé
+
+```sql
+CREATE TABLE energy_readings (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    household_id VARCHAR(100) NOT NULL,
+    reading_date DATE NOT NULL,
+    production_kwh DOUBLE PRECISION NOT NULL CHECK (production_kwh >= 0 AND isfinite(production_kwh)),
+    consumption_kwh DOUBLE PRECISION NOT NULL CHECK (consumption_kwh >= 0 AND isfinite(consumption_kwh)),
+    created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_energy_reading_household_date UNIQUE (household_id, reading_date)
+);
+
+CREATE TABLE energy_balances (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    household_id VARCHAR(100) NOT NULL,
+    period_start DATE NOT NULL,
+    period_end DATE NOT NULL,
+    total_production_kwh DOUBLE PRECISION NOT NULL CHECK (total_production_kwh >= 0 AND isfinite(total_production_kwh)),
+    total_consumption_kwh DOUBLE PRECISION NOT NULL CHECK (total_consumption_kwh >= 0 AND isfinite(total_consumption_kwh)),
+    surplus_kwh DOUBLE PRECISION NOT NULL CHECK (surplus_kwh >= 0 AND isfinite(surplus_kwh)),
+    CONSTRAINT ck_balance_period CHECK (period_start <= period_end),
+    CONSTRAINT uq_balance_household_period UNIQUE (household_id, period_start, period_end)
+);
+
+CREATE TABLE energy_alerts (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    household_id VARCHAR(100) NOT NULL,
+    alert_type VARCHAR(50) NOT NULL,
+    message TEXT NOT NULL,
+    severity VARCHAR(20) NOT NULL CHECK (severity IN ('INFO', 'WARNING', 'CRITICAL')),
+    created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(20) NOT NULL DEFAULT 'UNREAD'
+        CHECK (status IN ('UNREAD', 'READ', 'ARCHIVED'))
+);
+
+CREATE INDEX idx_readings_household_date
+    ON energy_readings (household_id, reading_date DESC);
+
+CREATE INDEX idx_balances_household_period
+    ON energy_balances (household_id, period_start, period_end);
+
+CREATE INDEX idx_alerts_household_status_date
+    ON energy_alerts (household_id, status, created_at DESC);
+```
+
+### Notes d'implémentation
+
+- Utiliser Flyway ou Liquibase pour versionner les migrations ; ne pas dépendre uniquement de `hibernate.hbm2ddl.auto=update` en équipe.
+- Avec `Double`, de légers écarts d'arrondi sont possibles ; définir une politique d'affichage/arrondi du kWh. Pour une exactitude décimale stricte, envisager `BigDecimal`/`NUMERIC`, ce qui constituerait **un changement du modèle Java actuellement retenu**.
+- `LocalDateTime` et `TIMESTAMP WITHOUT TIME ZONE` nécessitent une convention explicite (par exemple stockage logique en UTC) ; ne pas confondre ce champ avec un instant portant un décalage horaire.
+- `isfinite()` est une fonction PostgreSQL pour rejeter les valeurs non finies dans les contraintes des doubles.
+- Les chaînes de valeurs `alertType` sont définies dans l'application (ou dans une contrainte SQL additionnelle lorsque stabilisées).
+
+## 5. Calcul du bilan et du surplus
+
+Sur une période inclusive `[periodStart, periodEnd]` :
+
+```text
+totalProductionKwh  = somme des productionKwh
+                       des relevés du foyer sur la période
+totalConsumptionKwh = somme des consumptionKwh
+                       des relevés du foyer sur la période
+soldeNetKwh         = totalProductionKwh - totalConsumptionKwh
+surplusKwh          = max(soldeNetKwh, 0)
+```
+
+Exemples :
+
+| Production | Consommation | Solde net | Surplus théorique |
+|---:|---:|---:|---:|
+| 20 kWh | 12 kWh | +8 kWh | 8 kWh |
+| 7 kWh | 12 kWh | −5 kWh | 0 kWh |
+| 0 kWh | 0 kWh | 0 kWh | 0 kWh |
+
+Une période **sans relevé** doit être distinguée d'une période dont les relevés déclarent zéro production et zéro consommation. Le comportement de l'API doit être documenté (absence de données plutôt que fausse mesure nulle).
+
+### Exemple de requête SQL d'agrégation
+
+```sql
+SELECT
+    household_id,
+    COALESCE(SUM(production_kwh), 0) AS total_production_kwh,
+    COALESCE(SUM(consumption_kwh), 0) AS total_consumption_kwh,
+    GREATEST(
+        COALESCE(SUM(production_kwh), 0)
+        - COALESCE(SUM(consumption_kwh), 0),
+        0
+    ) AS surplus_kwh,
+    COUNT(*) AS reading_count
+FROM energy_readings
+WHERE household_id = :household_id
+  AND reading_date BETWEEN :period_start AND :period_end
+GROUP BY household_id;
+```
+
+Si aucun relevé ne correspond, la requête ne renvoie **aucune ligne** (ce qui permet de distinguer « aucune donnée » de « zéro déclaré »).
+
+## 6. Règles de gestion
+
+1. **Propriété du foyer :** `householdId` doit correspondre à un foyer valide et accessible au demandeur ; la vérification est effectuée via l'intégration Household, sans lecture de sa base.
+2. **Unicité journalière :** un `(householdId, readingDate)` unique ; une correction utilise `PUT` sur le relevé existant.
+3. **Validation :** dates cohérentes, quantités non négatives et finies ; contrôler les limites des saisies.
+4. **Cohérence des bilans :** une création, mise à jour ou suppression de relevé invalide/recalcule tous les bilans matérialisés couvrant cette date.
+5. **Alertes :** émission selon règles métiers configurables (seuils et disponibilité de données) ; gérer le risque de doublon lors du recalcul.
+6. **Accès interservices :** le Marketplace peut consulter le surplus déclaré sur la période ; il ne modifie pas les relevés et ne gère pas les bilans.
+7. **Limite temporelle :** un surplus journalier calculé n'implique pas qu'il soit physiquement disponible à une heure donnée.
+8. **Aucune garantie physique :** le service fournit de l'information déclarative pour une simulation de partage d'énergie.
+
+## 7. Exemples de repositories JPA (conception)
+
+```java
+public interface EnergyReadingRepository
+        extends JpaRepository<EnergyReading, Long> {
+
+    Optional<EnergyReading> findByHouseholdIdAndReadingDate(
+        String householdId, LocalDate readingDate);
+
+    List<EnergyReading> findByHouseholdIdAndReadingDateBetweenOrderByReadingDateAsc(
+        String householdId, LocalDate from, LocalDate to);
 }
 ```
 
-**Action AI Optimization :** utiliser les nouvelles mesures pour actualiser les données nécessaires aux prévisions et aux recommandations énergétiques.
+```java
+public interface EnergyBalanceRepository
+        extends JpaRepository<EnergyBalance, Long> {
 
-## Événement 2 — EnergyBalanceUpdated
-
-**Producteur :** Energy Monitoring Service  
-**Consommateur :** AI Energy Optimization Service
-
-**Déclenchement :** après le calcul et l'enregistrement d'un nouveau bilan énergétique.
-
-**Routing key :** `monitoring.balance.updated`
-
-Exemple JSON :
-
-```json
-{
-  "eventId": "evt_002",
-  "eventType": "EnergyBalanceUpdated",
-  "householdId": "house_101",
-  "totalProductionKwh": 12.5,
-  "totalConsumptionKwh": 7.5,
-  "surplusKwh": 5.0,
-  "deficitKwh": 0.0,
-  "periodStart": "2026-11-10T00:00:00Z",
-  "periodEnd": "2026-11-11T00:00:00Z",
-  "occurredAt": "2026-11-10T09:02:00Z"
+    Optional<EnergyBalance> findByHouseholdIdAndPeriodStartAndPeriodEnd(
+        String householdId, LocalDate start, LocalDate end);
 }
 ```
 
-**Action AI Optimization :** exploiter le bilan énergétique pour améliorer les prévisions de production, de consommation et de surplus.
+```java
+public interface EnergyAlertRepository
+        extends JpaRepository<EnergyAlert, Long> {
 
-## Événement 3 — EnergySurplusUpdated
-
-**Producteur :** Energy Monitoring Service  
-**Consommateurs :** Energy Marketplace Service et AI Energy Optimization Service
-
-**Déclenchement :** après le calcul ou la mise à jour du surplus énergétique d'un foyer.
-
-**Routing key :** `monitoring.surplus.updated`
-
-Exemple JSON :
-
-```json
-{
-  "eventId": "evt_003",
-  "eventType": "EnergySurplusUpdated",
-  "householdId": "house_101",
-  "surplusKwh": 5.0,
-  "periodStart": "2026-11-10T00:00:00Z",
-  "periodEnd": "2026-11-11T00:00:00Z",
-  "occurredAt": "2026-11-10T09:02:00Z"
+    List<EnergyAlert> findByHouseholdIdAndStatusOrderByCreatedAtDesc(
+        String householdId, String status);
 }
 ```
 
-**Action Marketplace :** mettre à jour les informations de surplus connues pour le foyer et utiliser ces informations lors de la vérification d'une nouvelle offre.
+Ces signatures sont **illustratives** et supposent que les noms des attributs JPA restent conformes aux trois entités ci-dessus.
 
-**Action AI Optimization :** utiliser le surplus pour proposer des recommandations de partage et d'optimisation énergétique.
+## 8. Tests de conception et de persistance
 
-L'événement ne crée pas automatiquement une offre dans Marketplace. La publication d'une offre reste une action du foyer dans le microservice Marketplace.
+| Test | Résultat attendu |
+|---|---|
+| Insérer un relevé valide | Identifiant généré et champs persistés |
+| Insérer un relevé identique foyer/date | Violation d'unicité / réponse API `409` |
+| Production ou consommation négative | Rejet de validation et de contrainte SQL |
+| Relevé avec `NaN`/infini | Rejet par validation/contrainte SQL |
+| Période de bilan inversée | Rejet |
+| Somme : 20 − 12 kWh | Surplus de 8 kWh |
+| Somme : 7 − 12 kWh | Surplus de 0 kWh |
+| Correction d'un relevé | Bilan matérialisé synchronisé ou invalidé |
+| Aucune lecture durant la période | Indicateur d'absence de données, pas un zéro fictif |
+| Consultation foyer non autorisé | Accès refusé |
 
-## Configuration des files RabbitMQ
+## 9. Évolutions envisageables (hors périmètre actuel)
 
-L'exchange `energyshare.events` est partagé entre les microservices.
+- Ingestion de mesures de capteurs IoT et granularité horaire.
+- Contrôle qualité des relevés et détection de valeurs aberrantes.
+- Historisation des corrections / journal d'audit.
+- Projections et prévisions énergétiques fondées sur des séries temporelles réelles.
 
-Chaque consommateur possède sa propre file afin de recevoir indépendamment les événements qui le concernent.
-
-| File | Routing key | Consommateur |
-|---|---|---|
-| `ai.monitoring.reading.queue` | `monitoring.reading.created` | AI Optimization |
-| `ai.monitoring.balance.queue` | `monitoring.balance.updated` | AI Optimization |
-| `marketplace.monitoring.surplus.queue` | `monitoring.surplus.updated` | Marketplace |
-| `ai.monitoring.surplus.queue` | `monitoring.surplus.updated` | AI Optimization |
-
-## Gestion des événements
-
-- Chaque événement possède un identifiant unique `eventId`.
-- Les événements sont publiés uniquement après l'enregistrement réussi des données correspondantes.
-- Les consommateurs doivent éviter les traitements en double grâce à `eventId`.
-- Un événement non traité pourra être réessayé.
-- Une file de messages morts (Dead Letter Queue) pourra conserver les messages dont le traitement échoue définitivement.
-- Les événements doivent conserver un format stable et versionnable.
-- Les dates sont transmises au format ISO 8601 en UTC.
-
-La publication fiable des événements pourra utiliser le pattern **Transactional Outbox**, afin de garantir la cohérence entre les données enregistrées dans PostgreSQL et les événements à publier dans RabbitMQ.
-
-Ces mécanismes sont prévus dans l'architecture et ne sont pas encore nécessairement implémentés lors de la Validation 1.
+Ces évolutions **ne font pas partie des trois entités et du périmètre actuels** du Monitoring.
